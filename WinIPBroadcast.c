@@ -1,21 +1,26 @@
 // Copyright (C) 2009 Etienne Dechamps
 
 /*
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 // WinIPBroadcast 1.3 by Etienne Dechamps <etienne@edechamps.fr>
+
+
+
+
+#include "WinIPBroadcast.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,20 +30,15 @@
 #include <Iphlpapi.h>
 #include <windows.h>
 
+
+
+
 #define SERVICE_NAME TEXT("WinIPBroadcast")
 #define SERVICE_DESC ( \
 	TEXT("Sends global IP broadcast packets to all network interfaces instead of just the preferred route.\n") \
 	TEXT("If this service is disabled, applications using global IP broadcast (e.g. server browsers) might not function properly.\n") \
 )
 
-#define IP_HEADER_SIZE 20
-#define IP_SRCADDR_POS 12
-#define IP_DSTADDR_POS 16
-
-#define UDP_HEADER_SIZE 8
-#define UDP_CHECKSUM_POS 6
-
-#define FORWARDTABLE_INITIAL_SIZE 4096
 
 HANDLE mainThread;
 SERVICE_STATUS_HANDLE serviceStatus;
@@ -48,7 +48,32 @@ SOCKET listenSocket;
 PMIB_IPFORWARDTABLE forwardTable;
 ULONG forwardTableSize;
 
-void quit(void);
+HANDLE relayMutex; // mutex for forwardTable (updates on NotifyRouteChange callback)
+
+void initCallbacks(void * params, PHANDLE *handles, unsigned int numHandles);
+void WINAPI notifyRouteCallback(PVOID params, PMIB_IPFORWARD_ROW2 route_upd_row, MIB_NOTIFICATION_TYPE t);
+
+
+
+void initCallbacks(void * params, PHANDLE *handles, unsigned int numHandles) {
+	HANDLE* handle;
+	if (numHandles > 0) {
+		handle = *handles;
+		NotifyRouteChange2(AF_INET, (PIPFORWARD_CHANGE_CALLBACK)&notifyRouteCallback, (void *)NULL, FALSE, (PHANDLE) &handle);
+	}
+	else {
+		fwprintf(stderr, TEXT("initCallbacks: Error Arg3 (numHandles) < 1."));
+	}
+}
+
+void WINAPI notifyRouteCallback(PVOID params, PMIB_IPFORWARD_ROW2 route_upd_row, MIB_NOTIFICATION_TYPE t) {
+	if (route_upd_row == NULL)
+		return;
+
+	(VOID)params; // unused arg
+
+	getForwardTable();
+}
 
 LPTSTR errorString(int err)
 {
@@ -125,6 +150,8 @@ DWORD getBroadcastPacket(char *buffer, size_t size, ULONG *srcAddress)
 	WSABUF wsaBuffer;
 	DWORD flags;
 	
+	ULONG dstAddress = 0;
+
 	wsaBuffer.buf = buffer;
 	wsaBuffer.len = size;
 	
@@ -149,12 +176,13 @@ DWORD getBroadcastPacket(char *buffer, size_t size, ULONG *srcAddress)
 	return len;
 }
 
+// Automatically ACQUIRES relayMutex!
 void getForwardTable()
 {
 	int result;
 	
+	WaitForSingleObject(relayMutex, INFINITE);
 	retry:
-	
 	result = GetIpForwardTable(forwardTable, &forwardTableSize, FALSE);
 
 	switch (result)
@@ -171,6 +199,7 @@ void getForwardTable()
 			fwprintf(stderr, TEXT("error: GetIpForwardTable failed with error code %d: %s"), result, errorString(result));
 			quit();
 	}
+	ReleaseMutex(relayMutex);
 }
 
 void computeUdpChecksum(char *payload, size_t payloadSize, DWORD srcAddress, DWORD dstAddress)
@@ -271,27 +300,53 @@ void sendBroadcast(ULONG srcAddress, char *payload, DWORD payloadSize)
 
 void relayBroadcast(char *payload, DWORD payloadSize, ULONG srcAddress)
 {
+	WaitForSingleObject(relayMutex, INFINITE);
+	_relayBroadcast(payload, payloadSize, srcAddress, 0);
+	ReleaseMutex(relayMutex);
+}
+
+
+// YOU MUST ACQUIRE relayMutex before etering!
+void _relayBroadcast(char *payload, DWORD payloadSize, ULONG srcAddress, ULONG captureAddress)
+{
 	DWORD i;
 	PMIB_IPFORWARDROW row;
 
-	getForwardTable();
-	
 	for (i = 0; i < forwardTable->dwNumEntries; i++)
 	{
 		row = &forwardTable->table[i];
-		
+
+
 		if (row->dwForwardDest != broadcastAddress)
 			continue;
-			
+
 		if (row->dwForwardMask != ULONG_MAX)
 			continue;
-			
+
 		if (row->dwForwardType != MIB_IPROUTE_TYPE_DIRECT)
 			continue;
-			
-		if (row->dwForwardNextHop == loopbackAddress || row->dwForwardNextHop == srcAddress)
+
+		if (row->dwForwardNextHop == loopbackAddress)
 			continue;
-			
+
+		if (row->dwForwardNextHop == srcAddress)
+			continue;
+
+		// DO NOT FORWARD to the main broadcast interface. This is to avoid infinite loop.
+		// Packets captured by WinPCAP have different ip set (192.255.255.255 instead of eg. 192.168.0.3)
+		if (row->dwForwardNextHop == captureAddress) {
+			continue;
+		}
+	/*
+#ifdef WPCAP
+		char nextHop[4 * 3 + 3 + 1];
+		wpcap_iptos(row->dwForwardNextHop, nextHop);
+		char src[4 * 3 + 3 + 1];
+		wpcap_iptos(srcAddress, src);
+
+		printf("Forwarding packet from %s to %s.\n", src, nextHop);
+#endif
+*/
 		sendBroadcast(row->dwForwardNextHop, payload, payloadSize);
 	}
 }
@@ -312,11 +367,22 @@ void loop()
 		
 	loopbackAddress = inet_addr("127.0.0.1");
 	broadcastAddress = inet_addr("255.255.255.255");
+
+	// forwardTable requires relayMutex.
 	forwardTable = malloc(FORWARDTABLE_INITIAL_SIZE);
 	forwardTableSize = FORWARDTABLE_INITIAL_SIZE;
 		
 	initListenSocket();
-	
+
+
+	relayMutex = CreateMutex(NULL, 0, TEXT("RelayBroadcastMutex"));
+	getForwardTable();
+	HANDLE routeNotifyCallback;
+	PHANDLE prouteNotifyCallback = &routeNotifyCallback;
+	initCallbacks(NULL, &prouteNotifyCallback, 1);
+
+	wpcap_main(); // does nothing unless WPCAP is defined.
+
 	while (TRUE)
 	{
 		len = getBroadcastPacket(buffer, sizeof(buffer), &srcAddress);
@@ -399,7 +465,7 @@ void serviceInstall(void)
 	ChangeServiceConfig2(service, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, &required_privileges);
 	SERVICE_SID_INFO sid = { SERVICE_SID_TYPE_UNRESTRICTED };
 	ChangeServiceConfig2(service, SERVICE_CONFIG_SERVICE_SID_INFO, &sid);
-		
+
 	CloseServiceHandle(service);
 	CloseServiceHandle(manager);
 }
