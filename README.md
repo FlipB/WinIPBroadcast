@@ -5,7 +5,7 @@ Only tested with version WinPCAP 4.1.3 and Windows 10.
 
 Bugs:
 
-* truncated packets longer than MTU. CRC is recalculated so partial data is delived.
+* Truncates packets longer than MTU. CRC is recalculated so partial data is delived. (only for WinPCAP captures)
 
 
 WinIPBroadcast 1.3
