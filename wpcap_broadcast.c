@@ -40,6 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define WPCAP_STATE_UNINITIALIZED -1
 #define WPCAP_STATE_BREAK -2
 
+#define WPCAP_FILTER_STR "src host %s and ip and udp and dst host 255.255.255.255 and (udp[0:2] = udp[2:2])"
 
 // DEFINITIONS
 
@@ -53,7 +54,6 @@ struct wpcap_interface {
 struct wpcap_context {
 	pcap_t *handle;
 	struct bpf_program filter_code;
-	char filter[128]; //"src host %s and ip and udp and dst host 255.255.255.255 and (udp[0:2] = udp[2:2])";
 	int state;
 };
 
@@ -173,7 +173,7 @@ static void wpcap_stop() {
 static BOOLEAN wpcap_init(struct wpcap_context *wpcap_context) {
 	wpcap_context->state = WPCAP_STATE_UNINITIALIZED;
 
-	snprintf(wpcap_context->filter, 128, "src host %%s and ip and udp and dst host 255.255.255.255 and (udp[0:2] = udp[2:2])");
+	//_snprintf_c(wpcap_context->filter, 128, "src host %%s and ip and udp and dst host 255.255.255.255 and (udp[0:2] = udp[2:2])");
 
 	unsigned int num_devices = wpcap_get_num_devices(wpcap_context);
 	if (num_devices == 0) {
@@ -216,7 +216,7 @@ static void wpcap_loop(struct wpcap_thread_args* args) {
 		ReleaseMutex(broadcast_interface_mutex);
 
 		// Generate WPCAP device string from Windows device name.
-		snprintf(source, MAX_ADAPTER_NAME_LENGTH + 4 + 22, "rpcap://\\Device\\NPF_%s", capture_interface.name);
+		_snprintf_c(source, MAX_ADAPTER_NAME_LENGTH + 4 + 22, "rpcap://\\Device\\NPF_%s", capture_interface.name);
 
 		// Open capture device
 		if ((wpcap_context->handle = pcap_open(source, 65536, PCAP_OPENFLAG_NOCAPTURE_LOCAL, 1000, NULL, tmp)) == NULL) {
@@ -320,7 +320,7 @@ static BOOLEAN wpcap_set_filter(struct wpcap_context *context, struct wpcap_inte
 	char filter[128];
 	char adapter_ip[3 * 4 + 3 + 1];
 	wpcap_iptos(bcast_if->address, adapter_ip);
-	snprintf(filter, 128, context->filter, adapter_ip);
+	_snprintf_c(filter, 128, WPCAP_FILTER_STR, adapter_ip);
 	if (pcap_compile(context->handle, &context->filter_code, filter, 1, bcast_if->netmask) < 0) {
 		return FALSE;
 	}
@@ -363,7 +363,7 @@ extern void wpcap_iptos(u_long in, char* ip_out)
 	u_char *p;
 
 	p = (u_char *)&in;
-	snprintf(ip_out, 3 * 4 + 3 + 1, "%d.%d.%d.%d", p[0], p[1], p[2], p[3]);
+	_snprintf_c(ip_out, 3 * 4 + 3 + 1, "%d.%d.%d.%d", p[0], p[1], p[2], p[3]);
 }
 
 
@@ -491,9 +491,9 @@ static void get_interface_changes(struct wpcap_interface* const bcast_if) {
 
 
 static void init_callbacks(struct wpcap_interface * const broadcast_interface, PHANDLE route_cb, PHANDLE interface_cb, PHANDLE address_cb) {
-	NotifyRouteChange2(AF_INET, (PIPFORWARD_CHANGE_CALLBACK)&route_update_callback, (void *)broadcast_interface, false, interface_cb);
-	NotifyIpInterfaceChange(AF_INET, &interface_update_callback, (void *)broadcast_interface, false, route_cb);
-	NotifyUnicastIpAddressChange(AF_INET, &address_update_callback, (void *)broadcast_interface, false, address_cb);
+	NotifyRouteChange2(AF_INET, (PIPFORWARD_CHANGE_CALLBACK)&route_update_callback, (void *)broadcast_interface, FALSE, interface_cb);
+	NotifyIpInterfaceChange(AF_INET, &interface_update_callback, (void *)broadcast_interface, FALSE, route_cb);
+	NotifyUnicastIpAddressChange(AF_INET, &address_update_callback, (void *)broadcast_interface, FALSE, address_cb);
 }
 
 static void WINAPI route_update_callback(PVOID ptr, PMIB_IPFORWARD_ROW2 route_upd_row, MIB_NOTIFICATION_TYPE t) {
