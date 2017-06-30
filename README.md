@@ -3,7 +3,10 @@ WinPCAP version
 Added support to use WinPCAP. Requires WinPCAP installed.
 Only tested with version WinPCAP 4.1.3 and Windows 10.
 
-Seems to work pretty well, but largely untested at this point - expect fixes to come.
+Bugs:
+
+* Truncates packets longer than MTU. CRC is recalculated so partial data is delived. (only for WinPCAP captures)
+
 
 WinIPBroadcast 1.3
 ==================
